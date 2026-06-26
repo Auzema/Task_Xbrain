@@ -5,6 +5,15 @@
 
 > [!IMPORTANT]
 > **Đọc trước khi bắt đầu**: Mỗi task đều có phần "Kiểm tra" để tự verify. Nếu task trước chưa pass kiểm tra → KHÔNG chuyển sang task tiếp theo.
+> [!NOTE]
+> **Quy ước đặt tên & Region**: Các tên resource trong plan này (ví dụ `tf1-cdo05-tfstate`, `tf1-alert-queue`...) là tên gợi ý. Thành viên có thể tự đặt tên theo quy ước riêng của nhóm, miễn là **nhất quán** xuyên suốt các resource. Tuy nhiên, các giá trị sau là **bắt buộc theo AI Contract** và **KHÔNG được thay đổi**:
+> - Region: `us-east-1`
+> - AI Engine namespace: `tf1-aiops`
+> - AI Engine service name: `tf1-ai-triage-engine`
+> - AI Engine port: `8080`
+> - Secret path: `tf1/ai-engine/service-auth-token`
+> - Headers: `X-Tenant-Id`, `X-Correlation-Id`
+> - Endpoints: `/healthz`, `/v1/triage`
 
 ---
 
@@ -53,11 +62,11 @@ graph LR
 **Mục đích**: Tạo nơi lưu trữ Terraform state an toàn, cho phép nhiều người cùng chạy Terraform mà không conflict.
 
 **Làm gì**:
-1. Tạo S3 bucket `tf1-cdo05-tfstate` ở region `ap-southeast-1`
+1. Tạo S3 bucket `tf1-cdo05-tfstate` ở region `us-east-1` _(tên bucket tự chọn, region bắt buộc theo contract)_
    - Bật versioning (để rollback state nếu lỗi)
    - Bật server-side encryption (SSE-S3 cho dev, SSE-KMS cho prod)
    - Block all public access
-2. Tạo DynamoDB table `tf1-cdo05-tflock`
+2. Tạo DynamoDB table `tf1-cdo05-tflock` _(tên table tự chọn)_
    - Partition key: `LockID` (String)
    - Dùng để lock state — tránh 2 người chạy `terraform apply` cùng lúc
 3. Cấu hình `backend.tf`:
@@ -66,7 +75,7 @@ graph LR
      backend "s3" {
        bucket         = "tf1-cdo05-tfstate"
        key            = "sandbox/terraform.tfstate"   # thay sandbox/staging/prod tùy env
-       region         = "ap-southeast-1"
+       region         = "us-east-1"
        dynamodb_table = "tf1-cdo05-tflock"
        encrypt        = true
      }
@@ -85,7 +94,7 @@ graph LR
 **Mục đích**: Tạo mạng riêng (VPC) cho toàn bộ hạ tầng. Mọi service sẽ nằm trong VPC này.
 
 **Làm gì** (module `modules/networking/`):
-1. **VPC**: CIDR block (ví dụ `10.0.0.0/16`)
+1. **VPC**: CIDR block _(tự chọn, ví dụ `10.0.0.0/16`)_
 2. **Subnets** — 3 Availability Zones, mỗi AZ có:
    - 1 **Public subnet**: chứa ALB, NAT Gateway
    - 1 **Private subnet**: chứa EKS nodes, Lambda ENI, tất cả workload
@@ -144,7 +153,7 @@ graph LR
    - Enable OIDC provider (bắt buộc cho IRSA ở M3)
    - Enable EKS audit logging → CloudWatch Logs
 2. **Managed Node Group**:
-   - Instance type: `t3.medium` hoặc `t3.large` (tùy budget)
+   - Instance type: _(tự chọn, ví dụ `t3.medium` hoặc `t3.large` tùy budget)_
    - Desired: 2, Min: 2, Max: 4
    - Đặt trong private subnets
    - Node group role với các policy: `AmazonEKSWorkerNodePolicy`, `AmazonEKS_CNI_Policy`, `AmazonEC2ContainerRegistryReadOnly`
@@ -158,7 +167,7 @@ graph LR
    - Cần IRSA role riêng
 
 **Kiểm tra**:
-- [ ] `aws eks describe-cluster --name tf1-cluster` trả về status `ACTIVE`
+- [ ] `aws eks describe-cluster --name <tên-cluster-của-bạn>` trả về status `ACTIVE`
 - [ ] `kubectl get nodes` thấy nodes `Ready`
 - [ ] `kubectl get pods -n kube-system` — tất cả pods Running
 - [ ] AWS Load Balancer Controller pod Running trong `kube-system`
@@ -170,14 +179,14 @@ graph LR
 **Mục đích**: Tạo hàng đợi tin nhắn cho alert pipeline. Alert đi vào queue → worker xử lý. Nếu xử lý thất bại nhiều lần → chuyển vào DLQ để review.
 
 **Làm gì**:
-1. **SQS FIFO Queue** `tf1-alert-queue.fifo`:
+1. **SQS FIFO Queue** `tf1-alert-queue.fifo` _(tên queue tự chọn, nhưng phải có đuôi `.fifo`)_:
    - FIFO (đảm bảo thứ tự + exactly-once processing)
    - Visibility timeout: 300s (thời gian worker xử lý 1 message)
    - Message retention: 4 days
    - Content-based deduplication: Enabled
    - SSE encryption: Enabled (SSE-SQS hoặc SSE-KMS)
    - Redrive policy: maxReceiveCount = 3 → chuyển sang DLQ
-2. **SQS FIFO DLQ** `tf1-alert-dlq.fifo`:
+2. **SQS FIFO DLQ** `tf1-alert-dlq.fifo` _(tên DLQ tự chọn, phải có đuôi `.fifo`)_:
    - FIFO (cùng loại với queue chính)
    - Message retention: 14 days (giữ lâu hơn để debug)
    - SSE encryption: Enabled
@@ -198,7 +207,7 @@ graph LR
 **Mục đích**: Tạo database cho workflow state — lưu trạng thái xử lý incident, tránh xử lý trùng.
 
 **Làm gì** (module `modules/data/`):
-1. **Table `incident_state`**:
+1. **Table `incident_state`** _(tên table tự chọn)_:
    - Partition key: `incident_id` (String)
    - Sort key: không cần (hoặc `correlation_key` nếu cần query theo correlation)
    - GSI trên `correlation_key` + `alert_fingerprint` (để query nhanh theo correlation)
@@ -229,7 +238,7 @@ created_at, updated_at, expires_at
 **Mục đích**: Tạo nơi lưu trữ artifacts — raw alert payloads, AI request/response, RCA reports, Jira/Slack payloads.
 
 **Làm gì**:
-1. **Bucket `tf1-audit-{account-id}`** (hoặc tên unique):
+1. **Bucket `tf1-audit-{account-id}`** _(tên bucket tự chọn, phải globally unique)_:
    - Versioning: Enabled
    - Block all public access: Enabled
    - Server-side encryption: SSE-S3 (dev) / SSE-KMS (prod)
@@ -263,7 +272,7 @@ created_at, updated_at, expires_at
 **Mục đích**: Tạo 2 Lambda functions — thin adapters cho alert ingestion và Jira/Slack integration.
 
 **Làm gì**:
-1. **Ingest Lambda** (`tf1-ingest-lambda`):
+1. **Ingest Lambda** (`tf1-ingest-lambda`) _(tên function tự chọn)_:
    - Runtime: Python 3.12 / Node.js 20
    - Trigger: API Gateway hoặc Function URL (nhận webhook từ Alertmanager)
    - Logic: validate payload → normalize → push to SQS FIFO
@@ -272,7 +281,7 @@ created_at, updated_at, expires_at
    - Timeout: 30s, Memory: 256MB
    - Environment variables: `SQS_QUEUE_URL`, `ENVIRONMENT`
 
-2. **Integration Lambda** (`tf1-integration-lambda`):
+2. **Integration Lambda** (`tf1-integration-lambda`) _(tên function tự chọn)_:
    - Runtime: Python 3.12 / Node.js 20
    - Trigger: invoked bởi CDO Correlator Worker (async invoke hoặc qua SQS)
    - Logic: tạo/update Jira ticket + gửi Slack notification
@@ -313,7 +322,7 @@ created_at, updated_at, expires_at
    - Webhook → Ingest Lambda (cho TF1 pipeline)
 
 **Kiểm tra**:
-- [ ] `kubectl get pods -n monitoring` (hoặc namespace tương ứng) — tất cả Running
+- [ ] `kubectl get pods -n monitoring` _(namespace tự chọn)_ — tất cả Running
 - [ ] Grafana accessible qua port-forward, dashboards hiện data
 - [ ] Prometheus targets page — tất cả targets UP
 - [ ] Alertmanager accessible, routing rules đúng
@@ -731,10 +740,10 @@ PR opened/updated (terraform/ changed)
 **Cách tạo IRSA**:
 ```bash
 # 1. Tạo K8s ServiceAccount
-kubectl create sa cdo-correlator-worker -n aiops
+kubectl create sa cdo-correlator-worker -n tf1-aiops
 
 # 2. Annotate với IAM role ARN
-kubectl annotate sa cdo-correlator-worker -n aiops \
+kubectl annotate sa cdo-correlator-worker -n tf1-aiops \
   eks.amazonaws.com/role-arn=arn:aws:iam::ACCOUNT:role/tf1-correlator-worker-role
 
 # 3. Pod spec sử dụng serviceAccountName: cdo-correlator-worker
@@ -762,7 +771,7 @@ kubectl annotate sa cdo-correlator-worker -n aiops \
 | `developer` | `triage-hub-*` | get/list/watch pods, logs, events; create port-forward | Team dev xem app |
 | `sre` | `triage-hub-*`, `monitoring` | Tất cả của developer + restart pods, scale deployments | Ops team |
 | `viewer` | tất cả | get/list/watch only | Stakeholders |
-| `cdo-correlator-worker` SA | `aiops` | get/list/watch pods (chỉ namespace `aiops`) | Worker pod |
+| `cdo-correlator-worker` SA | `tf1-aiops` | get/list/watch pods (chỉ namespace `tf1-aiops`) | Worker pod |
 
 **Quan trọng — KHÔNG cho phép**:
 - ❌ `secrets get/list` (secrets chỉ mount qua ESO)
@@ -771,7 +780,7 @@ kubectl annotate sa cdo-correlator-worker -n aiops \
 - ❌ `create/delete` namespaces bởi developer role
 
 **Kiểm tra**:
-- [ ] `kubectl auth can-i --as=developer get pods -n triage-hub-sandbox` → yes
+- [ ] `kubectl auth can-i --as=developer get pods -n triage-hub-sandbox` → yes _(namespace tự chọn)_
 - [ ] `kubectl auth can-i --as=developer delete deployments -n triage-hub-prod` → no
 - [ ] `kubectl auth can-i --as=developer get secrets -n triage-hub-prod` → no
 
@@ -806,12 +815,12 @@ kubectl annotate sa cdo-correlator-worker -n aiops \
    kind: SecretStore
    metadata:
      name: aws-secrets-manager
-     namespace: aiops
+     namespace: tf1-aiops
    spec:
      provider:
        aws:
          service: SecretsManager
-         region: ap-southeast-1
+         region: us-east-1
          auth:
            jwt:
              serviceAccountRef:
@@ -824,7 +833,7 @@ kubectl annotate sa cdo-correlator-worker -n aiops \
    kind: ExternalSecret
    metadata:
      name: jira-api-token
-     namespace: aiops
+     namespace: tf1-aiops
    spec:
      refreshInterval: 1m           # Check mỗi phút
      secretStoreRef:
@@ -857,7 +866,7 @@ kubectl annotate sa cdo-correlator-worker -n aiops \
    kind: NetworkPolicy
    metadata:
      name: default-deny-all
-     namespace: aiops
+     namespace: tf1-aiops
    spec:
      podSelector: {}
      policyTypes:
@@ -870,16 +879,16 @@ kubectl annotate sa cdo-correlator-worker -n aiops \
    | From | To | Port | Mục đích |
    |------|----|------|----------|
    | `triage-hub-*` pods | `monitoring` namespace | 9090 (Prometheus) | Push metrics |
-   | CDO Correlator (`aiops`) | AI Engine (`ai-engine`) | 8080 | RCA request |
+   | CDO Correlator (`tf1-aiops`) | AI Engine (`ai-engine`) | 8080 | RCA request |
    | AI Engine (`ai-engine`) | S3/Bedrock VPC Endpoints | 443 | Evidence + AI |
    | Alertmanager (`monitoring`) | Ingest Lambda | 443 | Webhook |
-   | `aiops` | SQS/DynamoDB/S3 VPC Endpoints | 443 | AWS services |
+   | `tf1-aiops` | SQS/DynamoDB/S3 VPC Endpoints | 443 | AWS services |
    | ALL pods | CoreDNS (`kube-system`) | 53 TCP+UDP | DNS resolution |
 
 3. **CNI**: Sử dụng AWS VPC CNI network policy (hoặc Calico/Cilium tùy quyết định team — open question SQ-03)
 
 **Kiểm tra**:
-- [ ] Pod trong `aiops` KHÔNG thể curl pod trong `monitoring` (trừ Prometheus 9090)
+- [ ] Pod trong `tf1-aiops` KHÔNG thể curl pod trong `monitoring` (trừ Prometheus 9090)
 - [ ] Pod trong `ai-engine` KHÔNG thể access internet trực tiếp
 - [ ] CDO Worker CÓ THỂ gọi AI Engine ở port 8080
 - [ ] DNS resolution vẫn hoạt động cho tất cả pods
@@ -896,7 +905,7 @@ kubectl annotate sa cdo-correlator-worker -n aiops \
    apiVersion: v1
    kind: Namespace
    metadata:
-     name: aiops
+     name: tf1-aiops
      labels:
        pod-security.kubernetes.io/enforce: restricted
        pod-security.kubernetes.io/warn: restricted
